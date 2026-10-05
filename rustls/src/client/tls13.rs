@@ -1525,6 +1525,12 @@ impl ExpectTraffic {
             }
         }
 
+        // "The value of zero indicates that the ticket should be discarded immediately."
+        // (RFC 9846 section 4.7.1)
+        if nst.lifetime.is_zero() {
+            return Ok(());
+        }
+
         self.session_storage
             .insert_tls13_ticket(self.session_key.clone(), value);
         Ok(())

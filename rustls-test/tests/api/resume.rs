@@ -3,12 +3,13 @@
 #![allow(clippy::disallowed_types, clippy::duplicate_mod)]
 
 use core::sync::atomic::{AtomicUsize, Ordering};
+use core::time::Duration;
 use std::fmt;
 use std::sync::Arc;
 
 use rustls::client::{Resumption, TicketRequest};
 use rustls::crypto::kx::NamedGroup;
-use rustls::crypto::{CertificateIdentity, Identity};
+use rustls::crypto::{CertificateIdentity, Identity, TicketProducer};
 use rustls::enums::ProtocolVersion;
 use rustls::error::{ApiMisuse, Error, PeerMisbehaved};
 use rustls::server::{ServerSessionKey, Tls13Tickets};
@@ -616,6 +617,66 @@ fn tls13_stateless_resumption() {
     );
     assert_eq!(client.handshake_kind(), Some(HandshakeKind::Resumed));
     assert_eq!(server.handshake_kind(), Some(HandshakeKind::Resumed));
+}
+
+#[test]
+fn tls13_ticket_with_zero_lifetime_is_discarded() {
+    let kt = KeyType::default();
+    let provider = provider::DEFAULT_TLS13_PROVIDER;
+    let storage = Arc::new(ClientStorage::new());
+    let mut client_config = make_client_config(kt, &provider);
+    client_config.resumption = Resumption::store(storage.clone());
+    let client_config = Arc::new(client_config);
+
+    let mut server_config = make_server_config(kt, &provider);
+    server_config.ticketer = Some(Arc::new(ZeroLifetimeTicketer));
+    let server_config = Arc::new(server_config);
+
+    let mut client_input = VecInput::default();
+    let mut server_input = VecInput::default();
+
+    // the first handshake leaves nothing behind for the second to resume from
+    for _ in 0..2 {
+        let mut client_output = Vec::new();
+        let mut server_output = Vec::new();
+        let (mut client, mut server) =
+            make_pair_for_arc_configs(&client_config, &server_config, &mut client_output);
+        do_handshake(
+            &mut client_input,
+            &mut client_output,
+            &mut client,
+            &mut server_input,
+            &mut server_output,
+            &mut server,
+        );
+        assert_eq!(client.tls13_tickets_received(), 2);
+        assert!(
+            !storage
+                .ops_and_reset()
+                .iter()
+                .any(|op| matches!(op, ClientStorageOp::InsertTls13Ticket(_)))
+        );
+        assert_eq!(client.handshake_kind(), Some(HandshakeKind::Full));
+        assert_eq!(server.handshake_kind(), Some(HandshakeKind::Full));
+    }
+}
+
+/// Issues tickets with a `ticket_lifetime` of zero.
+#[derive(Debug)]
+struct ZeroLifetimeTicketer;
+
+impl TicketProducer for ZeroLifetimeTicketer {
+    fn encrypt(&self, plain: &[u8]) -> Option<Vec<u8>> {
+        Some(plain.to_vec())
+    }
+
+    fn decrypt(&self, cipher: &[u8]) -> Option<Vec<u8>> {
+        Some(cipher.to_vec())
+    }
+
+    fn lifetime(&self) -> Duration {
+        Duration::ZERO
+    }
 }
 
 #[test]
